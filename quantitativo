@@ -1,0 +1,128 @@
+import pandas as pd
+from openpyxl import load_workbook
+from datetime import datetime
+
+# -----------------------------
+# Função para converter célula em data
+# -----------------------------
+def parse_data(cell):
+    if isinstance(cell, datetime):
+        return cell.date()
+    try:
+        return datetime.strptime(str(cell), "%d/%m/%Y").date()
+    except:
+        return None
+
+# -----------------------------
+# Arquivos
+# -----------------------------
+arquivo_escala = r"C:\Users\user\Desktop\Escala-de-Plant-o\ESCALA_FINAL_NOMES_COMPLETA.xlsx"
+arquivo_delegados = r"C:\Users\user\Desktop\Escala-de-Plant-o\delegados.xlsx"
+saida_final = r"C:\Users\user\Desktop\Escala-de-Plant-o\ESCALA_FINAL_FDS_DIURNO_BALANCEADO.xlsx"
+saida_relatorio = r"C:\Users\user\Desktop\Escala-de-Plant-o\quantitativo_fds_diurno.xlsx"
+
+# -----------------------------
+# Carregar delegados e férias
+# -----------------------------
+df_delegados = pd.read_excel(arquivo_delegados)
+df_delegados["Código"] = df_delegados["Código"].astype(str).str.strip()
+
+# Lista de delegados para rodízio (códigos 3–22)
+delegados_rodizio = df_delegados[df_delegados["Código"].astype(int).between(3, 22)]
+lista_delegados = list(zip(delegados_rodizio["Código"], delegados_rodizio["Nome"]))
+
+# Cria dicionário de férias
+ferias = {}
+for _, row in df_delegados.iterrows():
+    codigo = row["Código"]
+    periodos = []
+    for inicio_col, fim_col in [("Inicio Férias 1", "Término Férias 1"), ("Inicio Férias 2", "Término Férias 2")]:
+        inicio, fim = row[inicio_col], row[fim_col]
+        if pd.notna(inicio) and pd.notna(fim):
+            periodos.append((inicio.date(), fim.date()))
+    if periodos:
+        ferias[codigo] = periodos
+
+# -----------------------------
+# Carregar planilha da escala
+# -----------------------------
+wb = load_workbook(arquivo_escala)
+ws = wb.active
+
+col_data = 1    # coluna A
+col_diurno = 3  # coluna C
+col_noturno = 4 # coluna D
+
+# -----------------------------
+# Controle de plantões
+# -----------------------------
+contagem = {nome: 0 for _, nome in lista_delegados}
+
+# -----------------------------
+# Função para verificar restrições
+# -----------------------------
+def restricao(data, nome, row):
+    # Não pode estar no mesmo dia (noturno ou diurno)
+    if ws.cell(row=row, column=col_noturno).value == nome:
+        return True
+
+    # Não pode estar no dia anterior (diurno ou noturno)
+    if row > 2:
+        if ws.cell(row=row-1, column=col_diurno).value == nome:
+            return True
+        if ws.cell(row=row-1, column=col_noturno).value == nome:
+            return True
+
+    # Não pode estar no dia seguinte (diurno ou noturno)
+    if row < ws.max_row:
+        if ws.cell(row=row+1, column=col_diurno).value == nome:
+            return True
+        if ws.cell(row=row+1, column=col_noturno).value == nome:
+            return True
+
+    # Não pode estar em férias
+    codigo = next((c for c, n in lista_delegados if n == nome), None)
+    if codigo in ferias:
+        for inicio, fim in ferias[codigo]:
+            if inicio <= data <= fim:
+                return True
+
+    return False
+
+# -----------------------------
+# Preencher finais de semana diurnos
+# -----------------------------
+for row in range(2, ws.max_row + 1):
+    cell_data = ws.cell(row=row, column=col_data).value
+    data = parse_data(cell_data)
+    if not data:
+        continue
+
+    # sábado (5) ou domingo (6)
+    if data.weekday() in (5, 6):
+        cell_diurno = ws.cell(row=row, column=col_diurno)
+        if cell_diurno.value in (None, "", " "):
+            # Ordena delegados pela quantidade de plantões já atribuídos
+            candidatos = sorted(lista_delegados, key=lambda x: contagem[x[1]])
+            for codigo, nome in candidatos:
+                if not restricao(data, nome, row):
+                    cell_diurno.value = nome
+                    contagem[nome] += 1
+                    break
+
+# -----------------------------
+# Salvar planilha final
+# -----------------------------
+wb.save(saida_final)
+print(f"✅ Escala de finais de semana diurnos balanceada salva em: {saida_final}")
+
+# -----------------------------
+# Gerar relatório de quantitativo
+# -----------------------------
+df_resultado = pd.DataFrame.from_dict(contagem, orient='index', columns=['FDS Diurno'])
+df_resultado.index.name = 'Delegado'
+df_resultado = df_resultado.sort_values('FDS Diurno', ascending=False)
+
+# Salvar relatório
+df_resultado.to_excel(saida_relatorio)
+print(f"✅ Relatório de quantitativo salvo em: {saida_relatorio}")
